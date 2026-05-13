@@ -1,53 +1,62 @@
 // 麻將戰國列傳 — Service Worker
-// 版本號由 index.html 在安裝時動態傳入（時間戳記），
-// 因此每次上傳新版 index.html 後，使用者都會自動取得最新內容。
-let CACHE_NAME = 'dila-mj-v2'; // 預設值，會被 index.html 覆蓋
+// 策略：HTML 永遠從網路取得（保證最新版），靜態資源快取加速
+const CACHE_NAME = 'dila-mj-v3';
 
-const ASSETS = [
-  '/dila-mj/',
-  '/dila-mj/index.html',
+// 只快取不常變動的靜態資源
+const STATIC_ASSETS = [
   '/dila-mj/icon-192.png',
   '/dila-mj/icon-512.png',
   '/dila-mj/manifest.json',
 ];
 
-// ── 接收來自頁面的版本號 ────────────────────────────────────────
-self.addEventListener('message', event => {
-  if (event.data?.type === 'SET_VERSION') {
-    CACHE_NAME = 'dila-mj-' + event.data.version;
-  }
-});
-
-// ── 安裝：預先快取所有資源 ──────────────────────────────────────
+// ── 安裝：預先快取靜態資源 ──────────────────────────────────────
 self.addEventListener('install', event => {
   event.waitUntil(
     caches.open(CACHE_NAME).then(cache => {
-      console.log('[SW] 快取遊戲資源，版本：', CACHE_NAME);
-      return cache.addAll(ASSETS);
+      return cache.addAll(STATIC_ASSETS);
     }).then(() => self.skipWaiting())
   );
 });
 
-// ── 啟動：清除舊版快取 ──────────────────────────────────────────
+// ── 啟動：清除所有舊版快取 ──────────────────────────────────────
 self.addEventListener('activate', event => {
   event.waitUntil(
     caches.keys().then(keys =>
       Promise.all(
         keys
-          .filter(k => k.startsWith('dila-mj-') && k !== CACHE_NAME)
-          .map(k => {
-            console.log('[SW] 清除舊快取：', k);
-            return caches.delete(k);
-          })
+          .filter(k => k !== CACHE_NAME)
+          .map(k => caches.delete(k))
       )
     ).then(() => self.clients.claim())
   );
 });
 
-// ── 攔截請求：快取優先，網路備用 ───────────────────────────────
+// ── 攔截請求 ────────────────────────────────────────────────────
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
 
+  const url = new URL(event.request.url);
+
+  // HTML 文件：永遠走網路，失敗時才用快取（保證更新能到達使用者）
+  if (event.request.destination === 'document' ||
+      url.pathname.endsWith('.html') ||
+      url.pathname === '/dila-mj/' ||
+      url.pathname === '/dila-mj') {
+    event.respondWith(
+      fetch(event.request).then(response => {
+        // 順便更新快取
+        const toCache = response.clone();
+        caches.open(CACHE_NAME).then(cache => cache.put(event.request, toCache));
+        return response;
+      }).catch(() => {
+        // 離線時才用快取
+        return caches.match(event.request) || caches.match('/dila-mj/');
+      })
+    );
+    return;
+  }
+
+  // 靜態資源：快取優先，加速載入
   event.respondWith(
     caches.match(event.request).then(cached => {
       if (cached) return cached;
@@ -58,10 +67,6 @@ self.addEventListener('fetch', event => {
         const toCache = response.clone();
         caches.open(CACHE_NAME).then(cache => cache.put(event.request, toCache));
         return response;
-      }).catch(() => {
-        if (event.request.destination === 'document') {
-          return caches.match('/dila-mj/index.html');
-        }
       });
     })
   );
